@@ -1,0 +1,117 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+# devbox-gh-setup — copy a host `gh` login + git identity into the devbox VM.
+# Normally run as `devbox gh-setup [account]`; runs standalone too.
+#
+# The alternative is to set it by hand: put GH_TOKEN in ~/.devbox/rc/env and your
+# git identity + `!gh auth git-credential` helpers in ~/.devbox/rc/runtime.sh.
+
+require "fileutils"
+require "open3"
+
+VM         = "devbox"
+DEVBOX_DIR = File.expand_path("~/.devbox")
+
+# --- helpers (trimmed copies of the ones in ./devbox) -----------------
+
+def sh(*cmd, check: true)
+  ok = system(*cmd)
+  abort "devbox-gh-setup: failed: #{cmd.join(' ')}" if check && !ok
+  ok
+end
+
+def limactl(*args, check: true)
+  sh("limactl", *args, check: check)
+end
+
+# stdout of a command, or nil if it exited non-zero.
+def capture(*cmd)
+  out, status = Open3.capture2(*cmd)
+  status.success? ? out : nil
+end
+
+def which(cmd)
+  ENV["PATH"].to_s.split(File::PATH_SEPARATOR).any? { |d| File.executable?(File.join(d, cmd)) }
+end
+
+def choose(prompt, options)
+  warn prompt
+  options.each_with_index { |o, i| warn "#{i + 1}) #{o}" }
+  loop do
+    $stderr.print "#? "
+    pick = ($stdin.gets or exit(1)).to_i
+    return options[pick - 1] if pick.between?(1, options.size)
+  end
+end
+
+def vm_exists?
+  capture("limactl", "list", "-q").to_s.split("\n").include?(VM)
+end
+
+def vm_running?
+  capture("limactl", "list", "--format", "{{.Status}}", VM).to_s.strip == "Running"
+end
+
+# --- setup -----------------------------------------------------------
+
+def pick_gh_account(requested, known)
+  if requested && !known.empty? && !known.include?(requested)
+    abort "devbox: '#{requested}' is not a logged-in gh account (known: #{known.join(', ')})"
+  elsif requested   then requested
+  elsif known.one?  then known.first
+  elsif known.size > 1 && $stdin.tty?
+    choose("Which GitHub account should the VM use?", known)
+  else
+    abort "usage: devbox gh-setup <account>   (host logins: #{known.empty? ? 'none' : known.join(' ')})"
+  end
+end
+
+def gh_setup(account)
+  %w[gh git].each { |c| which(c) or abort "devbox: #{c} not found on host" }
+  system("gh", "auth", "status", out: File::NULL, err: File::NULL) or
+    abort "devbox: host is not logged in to gh — run 'gh auth login' first"
+
+  known = capture("gh", "auth", "status").to_s.scan(/account (\S+)/).flatten.uniq
+  acct  = pick_gh_account(account, known)
+
+  token = capture("gh", "auth", "token", "--hostname", "github.com", "--user", acct)&.strip
+  abort "devbox: could not read a token for '#{acct}'" if token.nil? || token.empty?
+
+  gh    = { "GH_TOKEN" => token }
+  login = capture(gh, "gh", "api", "user", "--jq", ".login").to_s.strip
+  uid   = capture(gh, "gh", "api", "user", "--jq", ".id").to_s.strip
+  name  = capture(gh, "gh", "api", "user", "--jq", ".name // .login").to_s.strip
+  email = capture(gh, "gh", "api", "user", "--jq", ".email // empty").to_s.strip
+  email = "#{uid}+#{login}@users.noreply.github.com" if email.empty?
+
+  cfg = "#{DEVBOX_DIR}/config"
+  FileUtils.mkdir_p(["#{cfg}/gh", "#{cfg}/git"])
+  File.write("#{cfg}/gh/hosts.yml", <<~YML)
+    github.com:
+        users:
+            #{login}:
+                oauth_token: #{token}
+        git_protocol: https
+        user: #{login}
+        oauth_token: #{token}
+  YML
+  FileUtils.chmod(0o600, "#{cfg}/gh/hosts.yml")
+
+  gcfg = "#{cfg}/git/config"
+  sh("git", "config", "--file", gcfg, "user.name",  name)
+  sh("git", "config", "--file", gcfg, "user.email", email)
+  %w[github.com gist.github.com].each do |h|
+    sh("git", "config", "--file", gcfg, "--remove-section", "credential.https://#{h}", check: false)
+    sh("git", "config", "--file", gcfg, "--add", "credential.https://#{h}.helper", "")
+    sh("git", "config", "--file", gcfg, "--add", "credential.https://#{h}.helper", "!gh auth git-credential")
+  end
+
+  puts "devbox: shared gh account '#{login}' <#{email}> into the VM (~/.devbox/config)"
+  if vm_exists? && vm_running?
+    limactl("shell", VM, "--", "bash", "-lc", "gh auth status", check: false)
+  else
+    puts "        run 'devbox' to start the VM and use it"
+  end
+end
+
+gh_setup(ARGV[0])

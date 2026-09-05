@@ -1,0 +1,64 @@
+minimumLimaVersion: "2.0.0"
+
+base: template:_images/debian-12
+
+cpus: 2
+memory: 4GiB
+disk: 20GiB
+
+mounts:
+- location: "{{.Home}}/.devbox/config"   # gh auth, mise + git config, agent config
+  mountPoint: "{{.Home}}/.config"
+  writable: true
+- location: "{{.Home}}/.devbox/cache"
+  mountPoint: "{{.Home}}/.cache"
+  writable: true
+- location: "{{.Home}}/.devbox/local"    #   npm globals, mise runtimes, uv tools
+  mountPoint: "{{.Home}}/.local"
+  writable: true
+- location: "{{.Home}}/.devbox/rc"       # env + runtime.sh, read-only (see devbox script)
+  mountPoint: "{{.Home}}/.devbox-rc"
+  writable: false
+
+provision: # Provision scripts re-run on every boot, slow ones are guarded by a sentinel
+
+- mode: system # setup env, unguarded
+  script: |
+    #!/bin/sh
+    cat > /etc/profile.d/devbox.sh <<'EOF'
+    export NPM_CONFIG_PREFIX="$HOME/.local/share/npm-global"
+    export PATH="$HOME/.local/bin:$HOME/.local/share/mise/shims:$NPM_CONFIG_PREFIX/bin:$PATH"
+    export GIT_CONFIG_GLOBAL="$HOME/.config/git/config"
+    export CLAUDE_CONFIG_DIR="$HOME/.config/claude"
+    export HISTFILE="$HOME/.local/state/bash_history"
+    if [ -f "$HOME/.devbox-rc/env" ]; then set -a; . "$HOME/.devbox-rc/env" || true; set +a; fi
+    EOF
+    grep -q devbox.sh /etc/bash.bashrc || echo '. /etc/profile.d/devbox.sh' >> /etc/bash.bashrc
+
+- mode: system # Build toolchain (mise compiles Ruby) + a headless browser.
+  script: |
+    #!/bin/bash
+    set -eux
+    if [ -e /var/lib/devbox-provisioned ]; then exit 0; fi
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends \
+      git curl ca-certificates build-essential jq \
+      libssl-dev libyaml-dev zlib1g-dev libffi-dev libreadline-dev \
+      chromium
+
+- mode: user # Ruby + Node + coding-agent CLIs (all land under the persisted ~/.local).
+  script: |
+    #!/bin/bash
+    set -eu
+    if [ -e /var/lib/devbox-provisioned ]; then exit 0; fi
+    . /etc/profile.d/devbox.sh
+    mkdir -p "$(dirname "$GIT_CONFIG_GLOBAL")" "$(dirname "$HISTFILE")"
+    curl -fsSL https://mise.run | sh
+    mise use -g gh node@22 ruby@3.3 uv
+    npm install -g @anthropic-ai/claude-code
+    uv tool install mistral-vibe
+    sudo touch /var/lib/devbox-provisioned
+
+message: |
+  devbox VM ready ✅  you can run `devbox gh-setup` to share github and git auth from the host

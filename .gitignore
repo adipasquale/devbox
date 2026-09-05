@@ -1,0 +1,5 @@
+.lima/
+*.log
+.fseventsd/
+.Trashes/
+.DS_Store

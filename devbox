@@ -1,0 +1,232 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "fileutils"
+require "open3"
+
+USAGE = <<~TXT
+  devbox — a Lima VM for LLM tools
+
+  Usage: devbox <command> [args]
+
+    shell                open a shell in the VM at the current dir
+    claude [args...]     run Claude Code, auto mode (args pass through)
+    vibe [args...]       run Mistral Vibe, auto mode (args pass through)
+    run <cmd...>         run a command in the VM at the cwd (prepend --skip-hooks to skip hooks)
+    mount-add <path>...  share more host dirs RW (restart ~10s; persisted)
+    mount-ls             list shared dirs
+    mount-rm <path>...   stop sharing host dirs (restart ~10s)
+    gh-setup [account]   copy a host gh login + git identity into the VM
+    stop                 shut the VM down
+    status               show VM status
+    rebuild              recreate the VM from devbox.yaml (~/.devbox kept)
+    nuke                 delete the VM and ~/.devbox
+TXT
+
+VM          = "devbox"
+ROOT        = File.expand_path(ENV["DEVBOX_ROOT"].to_s.empty? ? "~/dev/sandboxes" : ENV["DEVBOX_ROOT"])
+DEVBOX_DIR  = File.expand_path("~/.devbox")
+MOUNTS_FILE = "#{DEVBOX_DIR}/mounts" # extra mounts, one absolute path per line
+SELF_DIR    = File.dirname(File.realpath(__FILE__)) # realpath: usually run via a symlink
+YAML_FILE   = "#{SELF_DIR}/devbox.yaml"
+HOOK_FILE   = "#{SELF_DIR}/guest-hook.sh" # fed to `bash -lc` in the guest on entry
+
+# --- shell utils --------------------------------------------------------
+
+def sh(*cmd, check: true)
+  ok = system(*cmd)
+  abort "devbox: failed: #{cmd.join(' ')}" if check && !ok
+  ok
+end
+
+def limactl(*args, check: true)
+  sh("limactl", *args, check: check)
+end
+
+# stdout of a command, or nil if it exited non-zero.
+def capture(*cmd)
+  out, status = Open3.capture2(*cmd)
+  status.success? ? out : nil
+end
+
+# --- VM lifecycle -------------------------------------------------------
+
+def vm_exists?
+  capture("limactl", "list", "-q").to_s.split("\n").include?(VM)
+end
+
+def vm_running?
+  capture("limactl", "list", "--format", "{{.Status}}", VM).to_s.strip == "Running"
+end
+
+def mount_problem(path)
+  # Lima's `--mount host:writable` can't express a path with whitespace or ':'.
+  return "contains ':'"        if path.include?(":")
+  return "contains whitespace" if path.match?(/\s/)
+end
+
+def abspath(dir)
+  real = File.realpath(dir)
+  (why = mount_problem(real)) ? abort("devbox: #{why} — Lima can't mount: #{real}") : real
+rescue Errno::ENOENT
+  abort "devbox: no such directory: #{dir}"
+end
+
+def extra_mounts
+  File.exist?(MOUNTS_FILE) ? File.readlines(MOUNTS_FILE, chomp: true).reject(&:empty?) : []
+end
+
+def write_mounts(paths)
+  FileUtils.mkdir_p(DEVBOX_DIR)
+  File.write(MOUNTS_FILE, paths.empty? ? "" : "#{paths.join("\n")}\n")
+end
+
+def ensure_created
+  return if vm_exists?
+  abort "devbox: fix $DEVBOX_ROOT (#{mount_problem(ROOT)}): #{ROOT}" if mount_problem(ROOT)
+  %w[config cache local rc].each { |d| FileUtils.mkdir_p("#{DEVBOX_DIR}/#{d}") }
+  FileUtils.mkdir_p(ROOT)
+  mounts = [ROOT]
+  extra_mounts.each do |p|
+    (why = mount_problem(p)) ? warn("devbox: skipping mount (#{why}): #{p}") : (mounts << p)
+  end
+  limactl("create", "--name=#{VM}", "--yes",
+          *mounts.flat_map { |m| ["--mount", "#{m}:w"] }, YAML_FILE)
+end
+
+# --- entering the VM ---------------------------------------------------
+
+def within_shared_root?
+  [ROOT, *extra_mounts].any? { |b| Dir.pwd == b || Dir.pwd.start_with?("#{b}/") }
+end
+
+def warn_outside_root
+  return if within_shared_root?
+  warn "devbox: #{Dir.pwd} is outside the shared root (#{ROOT})"
+  warn %(        run:  devbox mount-add "#{Dir.pwd}")
+end
+
+def find_up(name)
+  dir = Dir.pwd
+  until dir == "/"
+    return dir if File.exist?(File.join(dir, name))
+    dir = File.dirname(dir)
+  end
+end
+
+# See guest-hook.sh: runs runtime.sh + the nearest .devbox.sh, both once per VM
+# boot, in the guest, with $1 = the project dir.
+def run_hooks
+  return unless ENV["DEVBOX_NO_HOOKS"].to_s.empty?
+  proj = find_up(".devbox.sh")
+  return if !proj && !File.exist?("#{DEVBOX_DIR}/rc/runtime.sh")
+  limactl("shell", "--start", VM, "--", "bash", "-lc", File.read(HOOK_FILE),
+          "_", proj.to_s, check: false)
+end
+
+def vm_shell(*argv, raw: false) # Replace this process with a VM shell at the cwd.
+  base = ["limactl", "shell", "--start", "--workdir", Dir.pwd, VM]
+  if argv.empty?     then exec(*base)
+  elsif raw          then exec(*base, "--", "bash", "-lc", argv.join(" "))
+  else                    exec(*base, "--", "bash", "-lc", 'exec "$@"', "_", *argv)
+  end
+end
+
+# --- commands --------------------------------------------------------
+
+def shell
+  ensure_created
+  warn_outside_root
+  run_hooks
+  vm_shell
+end
+
+def agent(name, args)
+  ensure_created
+  warn_outside_root
+  run_hooks
+  flags = name == "claude" ? %w[claude --dangerously-skip-permissions] : %w[vibe --agent auto-approve]
+  vm_shell(*flags, *args)
+end
+
+def run_cmd(argv)
+  skip_hooks = argv.first == "--skip-hooks"
+  argv.shift if skip_hooks
+  abort "usage: devbox run [--skip-hooks] <cmd>..." if argv.empty?
+  ensure_created
+  warn_outside_root
+  run_hooks unless skip_hooks
+  vm_shell(*argv, raw: true)
+end
+
+def mount_add(paths)
+  abort "usage: devbox mount-add <path>..." if paths.empty?
+  ensure_created
+  added = paths.map { |p| abspath(p) }
+  write_mounts((extra_mounts + added).uniq.sort)
+  limactl("stop", VM, check: false)
+  limactl("edit", VM, "--yes", *added.flat_map { |a| ["--mount", "#{a}:w"] })
+  exec("limactl", "start", VM)
+end
+
+def mount_ls
+  puts "#{ROOT}  (root)"
+  extra_mounts.each { |m| puts m }
+end
+
+def mount_rm(paths)
+  abort "usage: devbox mount-rm <path>..." if paths.empty?
+  abort "devbox: no extra mounts" unless File.exist?(MOUNTS_FILE)
+  targets = paths.map { |p| abspath(p) }
+  write_mounts(extra_mounts - targets)
+  limactl("stop", VM, check: false)
+  targets.each do |a|
+    limactl("edit", VM, "--yes", "--set",
+            %(del(.mounts[] | select(.location == "#{a}"))), check: false)
+  end
+  exec("limactl", "start", VM)
+end
+
+def stop
+  exec("limactl", "stop", VM)
+end
+
+def status
+  exec("limactl", "list", VM)
+end
+
+def rebuild
+  limactl("delete", "-f", VM, check: false)
+  ensure_created
+  puts "rebuilt — run 'devbox' to enter"
+end
+
+def nuke
+  limactl("delete", "-f", VM, check: false)
+  FileUtils.rm_rf(DEVBOX_DIR)
+  puts "nuked VM + ~/.devbox"
+end
+
+# --- CLI ------------------------------------------------------------------
+
+def main(argv)
+  cmd = argv.shift
+  case cmd
+  when nil, "help", "-h", "--help" then puts USAGE
+  when "shell"       then shell
+  when "claude"      then agent("claude", argv)
+  when "vibe"        then agent("vibe", argv)
+  when "run"         then run_cmd(argv)
+  when "mount-add"   then mount_add(argv)
+  when "mount-ls"    then mount_ls
+  when "mount-rm"    then mount_rm(argv)
+  when "gh-setup"    then exec(File.join(SELF_DIR, "devbox-gh-setup"), *argv)
+  when "stop"        then stop
+  when "status"      then status
+  when "rebuild"     then rebuild
+  when "nuke"        then nuke
+  else abort "devbox: unknown command: #{cmd}\n\n#{USAGE}"
+  end
+end
+
+main(ARGV)

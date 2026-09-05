@@ -1,0 +1,9 @@
+# Copy to ~/.devbox/rc/env — KEY=value lines, loaded into the VM environment
+# (login shells and `devbox <cmd>`). Read-only inside the VM. Keep it out of git.
+#
+# `devbox gh-setup` copies gh auth + git identity from the host. To set it up by
+# hand instead: put GH_TOKEN here, git identity + helpers in runtime.sh.
+
+# ANTHROPIC_API_KEY=sk-ant-...
+# MISTRAL_API_KEY=...
+# GH_TOKEN=ghp_...
