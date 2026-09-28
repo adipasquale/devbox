@@ -12,6 +12,7 @@ USAGE = <<~TXT
     shell                open a shell in the VM at the current dir
     claude [args...]     run Claude Code, auto mode (args pass through)
     vibe [args...]       run Mistral Vibe, auto mode (args pass through)
+    pi [args...]         run Pi, auto mode (args pass through)
     run <cmd...>         run a command in the VM at the cwd (prepend --skip-hooks to skip hooks)
     mount-add <path>...  share more host dirs RW (restart ~10s; persisted)
     mount-ls             list shared dirs
@@ -145,7 +146,11 @@ def agent(name, args)
   ensure_created
   warn_outside_root
   run_hooks
-  flags = name == "claude" ? %w[claude --dangerously-skip-permissions] : %w[vibe --agent auto-approve]
+  flags = case name
+          when "claude" then %w[claude --dangerously-skip-permissions]
+          when "vibe"   then %w[vibe --agent auto-approve]
+          when "pi"     then %w[pi --approve]
+          end
   vm_shell(*flags, *args)
 end
 
@@ -216,6 +221,7 @@ def main(argv)
   when "shell"       then shell
   when "claude"      then agent("claude", argv)
   when "vibe"        then agent("vibe", argv)
+  when "pi"          then agent("pi", argv)
   when "run"         then run_cmd(argv)
   when "mount-add"   then mount_add(argv)
   when "mount-ls"    then mount_ls

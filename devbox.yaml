@@ -30,6 +30,7 @@ provision: # Provision scripts re-run on every boot, slow ones are guarded by a 
     export PATH="$HOME/.local/bin:$HOME/.local/share/mise/shims:$NPM_CONFIG_PREFIX/bin:$PATH"
     export GIT_CONFIG_GLOBAL="$HOME/.config/git/config"
     export CLAUDE_CONFIG_DIR="$HOME/.config/claude"
+    export PI_CODING_AGENT_DIR="$HOME/.config/pi/agent"
     export HISTFILE="$HOME/.local/state/bash_history"
     if [ -f "$HOME/.devbox-rc/env" ]; then set -a; . "$HOME/.devbox-rc/env" || true; set +a; fi
     EOF
@@ -57,6 +58,7 @@ provision: # Provision scripts re-run on every boot, slow ones are guarded by a 
     curl -fsSL https://mise.run | sh
     mise use -g gh node@22 ruby@3.3 uv
     npm install -g @anthropic-ai/claude-code
+    npm install -g --ignore-scripts @earendil-works/pi-coding-agent
     uv tool install mistral-vibe
     sudo touch /var/lib/devbox-provisioned
 

@@ -21,7 +21,7 @@ devbox shell       # first run: 5-10 min (image, apt, mise builds ruby, agent CL
 | | |
 |---|---|
 | `devbox shell` | shell in the VM at your current dir |
-| `devbox claude\|vibe [args…]` | run Claude Code or Mistral Vibe in auto mode |
+| `devbox claude\|vibe\|pi [args…]` | run Claude Code, Mistral Vibe, or Pi in auto mode |
 | `devbox mount-add <path>…` | mount more host dirs RW (restart ~10s, persisted) |
 | `devbox rebuild` | recreate the VM from `devbox.yaml` after editing it (state in `~/.devbox` kept) |
 
@@ -33,7 +33,7 @@ To commit and push from the VM, :
 
 | host | in the VM | holds |
 |---|---|---|
-| `~/.devbox/config/` | `~/.config` (rw) | gh / git / mise config, Claude + Vibe auth & history |
+| `~/.devbox/config/` | `~/.config` (rw) | gh / git / mise config, Claude + Vibe + Pi auth & history |
 | `~/.devbox/cache/` | `~/.cache` (rw) | build & package caches |
 | `~/.devbox/local/` | `~/.local` (rw) | mise runtimes, npm & uv globals, shell history |
 | `~/.devbox/rc/` | `~/.devbox-rc` (**ro**) | `env` + `runtime.sh` — your config, below |
